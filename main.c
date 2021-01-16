@@ -14,8 +14,6 @@
 
 #include <stdio.h>      //include Serial Library
 
-#define RTC_FREQ    32768
-
 struct metal_spi_config *conf;
 
 unsigned char spi_tx_buf[600];

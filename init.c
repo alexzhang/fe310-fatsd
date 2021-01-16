@@ -3,10 +3,13 @@
 
 #include "global_handle.h"
 
+#include <metal/machine/platform.h>
+
 #include <metal/clock.h>
 #include <metal/cpu.h>
 #include <metal/gpio.h>
 #include <metal/init.h>
+#include <metal/io.h>
 #include <metal/machine.h>
 #include <metal/spi.h>
 
@@ -64,12 +67,16 @@ METAL_CONSTRUCTOR_PRIO(ctor_spi_1, 9004) {
      * Setup SPI 1 with SS under manual control
      */
     printf("[9004] ctor_spi_1 SPI 1 with manual SS\r\n");
-    metal_spi_init(spi1, 400000);
-    // turn off SS GPIO = 5, pin silkscreen = 13
+    metal_spi_init(spi1, 100000);
+    // turn off SS GPIO = 2, pin silkscreen = 10
+    metal_gpio_set_pin(gpio0, BOARD_PIN_10_SS, 1);
     metal_gpio_disable_input(gpio0, BOARD_PIN_10_SS);
     metal_gpio_enable_output(gpio0, BOARD_PIN_10_SS);
     metal_gpio_disable_pinmux(gpio0, BOARD_PIN_10_SS);
-    metal_gpio_set_pin(gpio0, BOARD_PIN_10_SS, 1);
+    // enable internal pull-up on FE310 for MISO
+    __METAL_ACCESS_ONCE(
+        (__metal_io_u32 *)(__metal_driver_sifive_gpio0_base(gpio0) + METAL_SIFIVE_GPIO0_PUE))
+        |= (1 << BOARD_PIN_12_MISO);
 }
 
 METAL_DESTRUCTOR_PRIO(destructor_goodbye, METAL_INIT_HIGHEST_PRIORITY) {

@@ -23,7 +23,7 @@ void sd_wait_notbusy (sd_context_t *sdc);
 /* Internal functions, used for SD card communications. */
 void sd_packarg(unsigned char *argument, uint32_t value);
 int sd_set_blocklen (sd_context_t *sdc, uint32_t length);
-int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_type, unsigned char *response, int arg);
+int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_type, int arg);
 void sd_delay(sd_context_t *sdc, const unsigned int number);
 
 #endif

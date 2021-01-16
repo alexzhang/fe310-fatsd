@@ -3,13 +3,13 @@
 #include "global_handle.h"
 #include "sd_cmd.h"
 
+#define RTC_FREQ 32768
+
 #define SD_DEBUG_PRINT
 #ifdef SD_DEBUG_PRINT
 #include <metal/time.h>
 #include <stdio.h>
 #endif
-
-static unsigned char response[5];
 
 unsigned char crc7shl1or1(const unsigned char * const buf, const unsigned int len)
 {
@@ -33,35 +33,67 @@ int sd_initialize(sd_context_t *sdc)
 
 	/* wait 1s */
 	timer_isr_flag = 0; // clear global timer ISR flag
-	metal_cpu_set_mtimecmp(cpu0, metal_cpu_get_mtime(cpu0) + RTC_FREQ/1000); // plus a second
+	metal_cpu_set_mtimecmp(cpu0, metal_cpu_get_mtime(cpu0) + (32768 * 1)); // plus a second
 	metal_interrupt_enable(tmr_intr, tmr_id); // Enable Timer interrupt
 	while (timer_isr_flag == 0); // do nothing while waiting
 	timer_isr_flag = 0; // clear global timer ISR flag
 
     /* start initialization SS high and at least 74 SCK cycles */
     SS_DEASSERT; // pin should still be high from constructor but we have this here just in case
-	sd_delay(sdc, 100); // this sends 800 cycles, which is more than enough
+	sd_delay(sdc, 10); // this sends 80 cycles, which is more than enough
 
     sdc->busyflag = 0;
 
     /* Put the card in the idle state. Early return if unsuccessful. */
-    if (sd_send_command(sdc, GO_IDLE_STATE, R_GO_IDLE_STATE, response, 0) == 0)
-        return 0;
+    if (sd_send_command(sdc, GO_IDLE_STATE, R_GO_IDLE_STATE, 0) == 0)
+        return 1;
 
-    sd_send_command(sdc, GO_IDLE_STATE, R_GO_IDLE_STATE, response, 0);
-    sd_delay(sdc, 100);
+    if (sdc->rx_buf[0] != (char)0x01)
+        return 1;
 
-    sd_send_command(sdc, SEND_IF_COND, R_SEND_IF_COND, response, 0x1AA);
-    sd_delay(sdc, 100);
+#ifdef SD_DEBUG_PRINT
+    printf("[T+%08lu] GO_IDLE_STATE success...\r\n", (unsigned long) metal_time());
+#endif
 
+    if (sd_send_command(sdc, SEND_IF_COND, R_SEND_IF_COND, 0x1AA) == 0)
+        return 1;
+    if (((sdc->rx_buf[3] & 0x0F) != (char)0x01) || (sdc->rx_buf[4] != (char)0xAA))
+        return 2; // FATAL: SD card incorrect echo response
 
-    sd_send_command(sdc, APP_CMD, R_APP_CMD, response, 0);
-    sd_delay(sdc, 100);
-    sd_send_command(sdc, SD_SEND_OP_COND, R_SD_SEND_OP_COND, response, 0x40000000);
-    sd_delay(sdc, 100);
+#ifdef SD_DEBUG_PRINT
+    printf("[T+%08lu] SEND_IF_COND success...\r\n", (unsigned long) metal_time());
+#endif
+
+    /* CMD55-ACMD41 init loop with 1-second timeout */
+    timer_isr_flag = 0; // clear global timer ISR flag
+	metal_cpu_set_mtimecmp(cpu0, metal_cpu_get_mtime(cpu0) + (32768 * 1)); // plus a second
+	metal_interrupt_enable(tmr_intr, tmr_id); // Enable Timer interrupt
+    while (1) {
+        sd_send_command(sdc, APP_CMD, R_APP_CMD, 0);
+        if (sdc->rx_buf[0] == 0x05)
+            return 3; // Must be old SD card, try CMD1
+        sd_send_command(sdc, SD_SEND_OP_COND, R_SD_SEND_OP_COND, 0x40000000);
+        if (sdc->rx_buf[0] == 0x05)
+            return 3; // Must be old SD card, try CMD1
+        else if (sdc->rx_buf[0] == 0x00)
+            break;
+        if (timer_isr_flag != 0) {
+	        timer_isr_flag = 0; // clear global timer ISR flag
+            return 2; // FATAL: SD card did not init within 1 second
+        }
+    }
+
+    sd_send_command(sdc, READ_OCR, R_READ_OCR, 0);
+
+#ifdef SD_DEBUG_PRINT
+    if (sdc->rx_buf[1] & 0x40)
+        printf("[T+%08lu] SDHC/XC init success...\r\n", (unsigned long) metal_time());
+    else
+        printf("[T+%08lu] SD init success...\r\n", (unsigned long) metal_time());
+#endif
 }
 
-int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_type, unsigned char *response, int arg)
+int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_type, int arg)
 {
     sdc->tx_buf[0] = 0x40 | cmd;
 	sdc->tx_buf[4] = 0xFF & arg; arg >>= 8; // SD spi big endian
@@ -73,12 +105,13 @@ int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_
     const unsigned int response_length = SD_RESPONSE_TYPE_LENGTH_LUT[response_type];
 
     /* send the command */
+    sd_delay(sdc, 1);
     SS_ASSERT;
+    sd_delay(sdc, 1);
     metal_spi_transfer(spi1, sdc->spi_conf, 6, sdc->tx_buf, sdc->rx_buf);
     #ifdef SD_DEBUG_PRINT
-        printf("[T+%08lu] [SPI] [CMD%d] ", (unsigned long) metal_time(), (signed int) cmd);
-        for (unsigned short i = 0; i < 6; ++i) printf("%02X ", (unsigned char)sdc->tx_buf[i]); printf(" |  ");
-        for (unsigned short i = 0; i < 6; ++i) printf("%02X ", (unsigned char)sdc->rx_buf[i]); printf("\r\n");
+        printf("[T+%08lu] [SPI] [CMD%d]", (unsigned long) metal_time(), (signed int) cmd);
+        for (unsigned short i = 0; i < 6; ++i) printf(" %02X", (unsigned char)sdc->tx_buf[i]); printf("\r\n");
     #endif
 
     /* wait for a response */
@@ -86,13 +119,12 @@ int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_
     unsigned int i = 0;
     do {
         metal_spi_transfer(spi1, sdc->spi_conf, 1, sdc->tx_buf, sdc->rx_buf);
-        #ifdef SD_DEBUG_PRINT
-            printf("[T+%08lu] [SPI] [WAIT] %02X  |  %02X\r\n", (unsigned long) metal_time(), (unsigned char)sdc->tx_buf[0], (unsigned char)sdc->rx_buf[0]);
-        #endif
 
         ++i;
         if (i >= SD_CMD_TIMEOUT) {
+            sd_delay(sdc, 1);
             SS_DEASSERT;
+            sd_delay(sdc, 1);
             return 0;
         }
     } while (sdc->rx_buf[0] & 0x80);
@@ -100,12 +132,11 @@ int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_
     /* handle responses that are longer than 1 byte */
     for (i = 1; i < response_length; ++i) {
         sdc->tx_buf[i] = 0xFF;
-        metal_spi_transfer(spi1, sdc->spi_conf, response_length - 1, sdc->tx_buf + 1, sdc->rx_buf + 1);
-        sdc->rx_buf[i];
     }
+    metal_spi_transfer(spi1, sdc->spi_conf, response_length - 1, sdc->tx_buf + 1, sdc->rx_buf + 1);
 
     #ifdef SD_DEBUG_PRINT
-        printf("[T+%08lu] [SPI] [RESP] ", (unsigned long) metal_time(), (signed int) cmd);
+        printf("[T+%08lu] [SPI] [RESP]", (unsigned long) metal_time(), (signed int) cmd);
         for (unsigned short i = 0; i < response_length; ++i) printf(" %02X", (unsigned char)sdc->rx_buf[i]); printf("\r\n");
     #endif
 
@@ -131,7 +162,9 @@ int sd_send_command(sd_context_t *sdc, unsigned char cmd, unsigned int response_
         #endif
     }
 
+    sd_delay(sdc, 1);
     SS_DEASSERT;
+    sd_delay(sdc, 1);
 
     return 1;
 }

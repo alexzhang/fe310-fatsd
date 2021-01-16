@@ -1,7 +1,10 @@
 #ifndef GLOBAL_HANDLE_H
 #define GLOBAL_HANDLE_H
 
-#define BOARD_PIN_10_SS 2
+#define BOARD_PIN_10_SS   2
+#define BOARD_PIN_11_MOSI 3
+#define BOARD_PIN_12_MISO 4
+#define BOARD_PIN_13_SCK  5
 
 #include <metal/cpu.h>
 #include <metal/gpio.h>
